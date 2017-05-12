@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Copyright (C) 2014 Nicolas Can
@@ -33,7 +34,7 @@ from django.contrib.auth.models import User
 from datetime import datetime
 from django.conf import settings
 from django.dispatch import receiver
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_save, pre_save, post_delete
 from django.contrib.sites.shortcuts import get_current_site
 from elasticsearch import Elasticsearch
 # django-taggit
@@ -42,11 +43,14 @@ from django.core.exceptions import ValidationError
 from core.models import Video, get_storage_path, EncodingType
 import base64
 import logging
+from django.forms.formsets import ORDERING_FIELD_NAME
 logger = logging.getLogger(__name__)
 import unicodedata
 import json
+from pod_project.tasks import task_start_encode
 
 ES_URL = getattr(settings, 'ES_URL', ['http://127.0.0.1:9200/'])
+REMOVE_VIDEO_FILE_SOURCE_ON_DELETE = getattr(settings, 'REMOVE_VIDEO_FILE_SOURCE_ON_DELETE', True)
 
 
 # gloabl function to remove accent, use in tags
@@ -99,12 +103,6 @@ class Channel(models.Model):
     def get_absolute_url(self):
         return reverse('channel', kwargs={'slug_c': self.slug})
 
-    def video_count(self):
-        return self.pod_set.filter(is_draft=False, encodingpods__gt=0).distinct().count()
-        # return Video.objects.filter(categories__in=self.categories.all()).filter(is_draft=False).count()
-        # return self.video_set.all().count()
-    video_count.short_description = _('count')
-
 
 @python_2_unicode_compatible
 class Theme(models.Model):
@@ -140,12 +138,6 @@ class Theme(models.Model):
     def get_absolute_url(self):
         return reverse('theme', kwargs={'slug_c': self.channel.slug, 'slug_t': self.slug})
 
-    def video_count(self):
-        return self.pod_set.filter(is_draft=False, encodingpods__gt=0).distinct().count()
-        # return Video.objects.filter(categories__in=self.categories.all()).filter(is_draft=False).count()
-        # return self.video_set.all().count()
-    video_count.short_description = _('count')
-
 
 @python_2_unicode_compatible
 class Type(models.Model):
@@ -176,12 +168,6 @@ class Type(models.Model):
     def __unicode__(self):
         return "%s" % (self.title)
 
-    def video_count(self):
-        return self.pod_set.filter(is_draft=False, encodingpods__gt=0).distinct().count()
-        # return Video.objects.filter(categories__in=self.categories.all()).filter(is_draft=False).count()
-        # return self.video_set.all().count()
-    video_count.short_description = _('count')
-
 
 @python_2_unicode_compatible
 class Discipline(models.Model):
@@ -211,12 +197,6 @@ class Discipline(models.Model):
 
     def __unicode__(self):
         return "%s" % (self.title)
-
-    def video_count(self):
-        return self.pod_set.filter(is_draft=False, encodingpods__gt=0).distinct().count()
-        # return Video.objects.filter(categories__in=self.categories.all()).filter(is_draft=False).count()
-        # return self.video_set.all().count()
-    video_count.short_description = _('count')
 
 
 def get_nextautoincrement(mymodel):
@@ -388,6 +368,21 @@ class Pod(Video):
             video=self, encodingType__output_height=240, encodingFormat="video/mp4")
         return encoding_240.encodingFile.url
 
+    def get_MP4_480_URL(self):
+        encoding_480 = EncodingPods.objects.get(
+            video=self, encodingType__output_height=480, encodingFormat="video/mp4")
+        return encoding_480.encodingFile.url
+
+    def get_MP4_720_URL(self):
+        encoding_720 = EncodingPods.objects.get(
+            video=self, encodingType__output_height=720, encodingFormat="video/mp4")
+        return encoding_720.encodingFile.url
+
+    def get_MP4_1080_URL(self):
+        encoding_1080 = EncodingPods.objects.get(
+            video=self, encodingType__output_height=1080, encodingFormat="video/mp4")
+        return encoding_1080.encodingFile.url
+
     def get_mediatype(self):
         # print "get_mediatype : %s - %s" %(self.id,
         # self.encodingpods_set.values_list("encodingType__mediatype",
@@ -401,6 +396,10 @@ class Pod(Video):
         for encoding in self.encodingpods_set.all():
             if encoding.encodingFile:
                 encoding.encodingFile.delete()
+
+        # on supprime le fichier source
+        if REMOVE_VIDEO_FILE_SOURCE_ON_DELETE:
+            self.video.delete()
         super(Pod, self).delete()
 
     def is_richmedia(self):
@@ -471,7 +470,10 @@ def launch_encode(sender, instance, created, **kwargs):
         instance.to_encode = False
         instance.encoding_in_progress = True
         instance.save()
-        start_encode(instance)
+        if settings.CELERY_TO_ENCODE:
+            task_start_encode.delay(instance)
+        else:
+            start_encode(instance)
 
 
 def start_encode(video):
@@ -500,6 +502,22 @@ def update_video_index(sender, instance=None, created=False, **kwargs):
         else:
             delete = es.delete(
                 index="pod", doc_type='pod', id=pod.id, refresh=True, ignore=[400, 404])
+
+@receiver(post_delete)  # instead of @receiver(post_save, sender=Rebel)
+def update_es_index(sender, instance=None, created=False, **kwargs):
+    print "POST DELETE"
+    list_of_models = ('ChapterPods', 'EnrichPods', 'ContributorPods', 'Pod')
+    if sender.__name__ in list_of_models:  # this is the dynamic part you want
+        pod = None
+        es = Elasticsearch(ES_URL)
+        if sender.__name__ == "Pod":
+            pod = instance
+            delete = es.delete(
+                index="pod", doc_type='pod', id=pod.id, refresh=True, ignore=[400, 404])
+        else:
+            pod = instance.video
+            res = es.index(index="pod", doc_type='pod', id=pod.id,
+                           body=pod.get_json_to_index(), refresh=True)
 
 
 @python_2_unicode_compatible
@@ -1106,3 +1124,47 @@ class ReportVideo(models.Model):
         verbose_name = _("Report")
         verbose_name_plural = _("Reports")
         unique_together = ('video', 'user',)
+
+@python_2_unicode_compatible
+class Rssfeed(models.Model):
+    AUDIO = 'A'
+    VIDEO = 'V'
+    TYPE_CHOICES = (
+        (AUDIO, 'Audio'),
+        (VIDEO, 'Vidéo'),
+    )
+    title = models.CharField(max_length=200, blank=False, unique_for_year='date_update')
+    description = models.TextField(blank=False)
+    link_rss = models.URLField(max_length=200, blank=False)
+    type_rss = models.CharField(max_length=1,
+                           choices=TYPE_CHOICES,
+                           default=AUDIO)
+    year = models.PositiveSmallIntegerField(default=2017)
+    date_update = models.DateTimeField(auto_now=True)
+    # récupérer le user à la création
+    owner = models.ForeignKey(User, blank=False, null=False, on_delete=models.PROTECT, default=1)
+    filters = models.TextField(blank=True)
+    fil_type_pod = models.ForeignKey(Type, verbose_name=_('Type'))
+    fil_discipline = models.ManyToManyField(
+        Discipline, blank=True, verbose_name=_('Disciplines'))
+    fil_channel = models.ManyToManyField(
+        Channel, verbose_name=_('Channels'), blank=True)
+    fil_theme = models.ManyToManyField(
+        Theme, verbose_name=_('Themes'), blank=True)
+    limit = models.SmallIntegerField(verbose_name=_('Count items'),
+                                     help_text=_(u'Keep 0 to mean all items'),default=0)
+    is_up = models.BooleanField(verbose_name=_('Visible'),
+        help_text=_(
+            u'If this box is checked, the video will be visible and accessible by anyone.'),
+        default=True)
+    
+    class Meta:
+        verbose_name = _("RSS")
+        verbose_name_plural = _("RSS")
+        
+        
+    def __unicode__(self):
+        return self.title
+
+    def __str__(self):
+        return self.title
