@@ -24,7 +24,11 @@ class Migration(migrations.Migration):
                 ('type_rss', models.CharField(default='A', max_length=1, choices=[('A', 'Audio'), ('V', 'Vid\xe9o')])),
                 ('year', models.PositiveSmallIntegerField(default=2017)),
                 ('date_update', models.DateTimeField(auto_now=True)),
+<<<<<<< HEAD
                 ('filters', models.TextField()),
+=======
+                ('filters', models.TextField(blank=True)),
+>>>>>>> upstream/dev
                 ('limit', models.SmallIntegerField(default=0, help_text='Keep 0 to mean all items', verbose_name='Count items')),
                 ('is_up', models.BooleanField(default=True, help_text='If this box is checked, the video will be visible and accessible by anyone.', verbose_name='Visible')),
                 ('fil_channel', models.ManyToManyField(to='pods.Channel', verbose_name='Channels', blank=True)),
