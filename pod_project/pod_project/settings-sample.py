@@ -282,5 +282,9 @@ TEMPLATE_VISIBLE_SETTINGS = (
     'TITLE_ETB',
     'TITLE_SITE',
     'USE_XHR_FORM_UPLOAD',
-    'WEBTV'
+    'WEBTV',
+    'USE_PRIVATE_VIDEO',
+    'RSS',
+    'ATOM_HD',
+    'ATOM_SD'
 )
